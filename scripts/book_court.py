@@ -105,7 +105,26 @@ def run(attempt: int = 1):
             # Fill credentials wherever the form appeared
             _fill_login_form(page)
 
-            # ── 3. Navigate to padel courts if not already there ──────────
+            # ── 3. Click through to the activity if needed ───────────────
+            activity_selectors = [
+                "text=Padel Courts 60 minutes",
+                "a:has-text('Padel Courts 60 minutes')",
+                "button:has-text('Padel Courts 60 minutes')",
+                "[class*='activity']:has-text('Padel Courts')",
+            ]
+            for sel in activity_selectors:
+                try:
+                    btn = page.wait_for_selector(sel, timeout=5000)
+                    if btn and btn.is_visible():
+                        log.info(f"Clicking activity: {sel}")
+                        btn.click()
+                        page.wait_for_load_state("networkidle", timeout=15_000)
+                        page.wait_for_timeout(2000)
+                        break
+                except PlaywrightTimeout:
+                    continue
+
+            # ── 5. Navigate to padel courts if not already there ──────────
             if "/padel-courts" not in page.url:
                 log.info("Navigating to padel courts page…")
                 page.goto(BOOKING_URL, wait_until="networkidle", timeout=30_000)
