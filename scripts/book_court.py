@@ -351,6 +351,7 @@ def _select_time_slot(page, target_time: str, court_pref: str) -> bool:
             log.info(f"Clicking 'Book' for slot {time_24h}")
             btn.click()
             page.wait_for_timeout(2000)
+            _handle_selection_modal(page)
             return True
     except Exception as e:
         log.warning(f"Strategy 1 failed: {e}")
@@ -378,6 +379,7 @@ def _select_time_slot(page, target_time: str, court_pref: str) -> bool:
                         log.info("Strategy 2: clicking revealed 'Book' button")
                         book_btn.click()
                         page.wait_for_timeout(2000)
+                        _handle_selection_modal(page)
                         return True
             except Exception:
                 pass
@@ -438,6 +440,38 @@ def _booking_confirmed(page) -> bool:
         log.info(f"URL suggests progression to checkout/confirmation: {page.url}")
         return True
 
+    return False
+
+
+def _handle_selection_modal(page) -> bool:
+    """
+    After clicking a slot, Lensbury shows a "Your selection" modal with
+    "Book now" and "Add to basket" buttons. Click "Book now" to proceed
+    straight to the checkout form. Returns True if a button was clicked.
+    """
+    page.wait_for_timeout(1500)
+    modal_buttons = [
+        "button:has-text('Book now')",
+        "button:has-text('Add to basket')",  # fallback — still proceeds to basket
+    ]
+    for sel in modal_buttons:
+        try:
+            btn = page.wait_for_selector(sel, timeout=5000)
+            if btn and btn.is_visible() and btn.is_enabled():
+                log.info(f"Selection modal: clicking {sel}")
+                btn.click()
+                page.wait_for_timeout(2500)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15_000)
+                except PlaywrightTimeout:
+                    pass
+                return True
+        except PlaywrightTimeout:
+            continue
+        except Exception as e:
+            log.warning(f"Selection modal button {sel} errored: {e}")
+            continue
+    log.info("No selection modal detected (or no button to click)")
     return False
 
 
