@@ -223,128 +223,127 @@ def _fill_login_form(page):
 
 def _select_date(page, target_iso: str):
     """
-    Attempt to find and click the target date in a calendar widget.
-    Flow.onl renders a calendar; we look for the date by aria-label or text.
+    Click the correct day in the horizontal day-strip on the Lensbury timetable page.
+    The strip shows cells like "Wed\n24", "Thu\n25" etc.
+    Scrolls forward if the target day is not yet visible.
     """
-    year, month, day = target_iso.split("-")
-    day_int = int(day)
-
-    # Common calendar date cell patterns
-    date_selectors = [
-        f"[aria-label*='{target_iso}']",
-        f"[data-date='{target_iso}']",
-        f"td:has-text('{day_int}')",          # fallback: find by day number
-        f"button:has-text('{day_int}')",
-    ]
-
-    for sel in date_selectors:
-        try:
-            cells = page.query_selector_all(sel)
-            # Filter to visible, enabled cells
-            for cell in cells:
-                if cell.is_visible() and cell.is_enabled():
-                    cell.click()
-                    page.wait_for_timeout(1500)
-                    log.info(f"Selected date using selector: {sel}")
-                    return
-        except Exception:
-            continue
-
-    # If we got here, try navigating forward in the calendar month
-    log.warning("Could not find date cell directly, trying to navigate calendar…")
-    _navigate_calendar_to_date(page, target_iso)
-
-
-def _navigate_calendar_to_date(page, target_iso: str):
-    """Navigate calendar forward/back until the target month is visible, then click the day."""
     from datetime import datetime
     target_dt = datetime.strptime(target_iso, "%Y-%m-%d")
-    day_int = target_dt.day
+    day_num  = target_dt.day
+    day_abbr = target_dt.strftime("%a")  # e.g. "Tue"
 
-    next_btn_selectors = [
-        "button[aria-label='Next month']",
-        "button[aria-label='next']",
-        "button:has-text('›')",
-        "button:has-text('>')",
-        "[class*='next']",
-    ]
+    log.info(f"Looking for day strip cell: {day_abbr} {day_num}")
 
-    for _ in range(3):  # try at most 3 months forward
-        for sel in next_btn_selectors:
+    for attempt in range(14):
+        cells = page.query_selector_all("div, button, td, th, span, a")
+        for cell in cells:
+            try:
+                if not cell.is_visible():
+                    continue
+                text = cell.inner_text().strip()
+                if day_abbr in text and str(day_num) in text and len(text) < 20:
+                    log.info(f"Found date cell: '{text}' — clicking")
+                    cell.click()
+                    page.wait_for_timeout(2000)
+                    return
+            except Exception:
+                continue
+
+        log.info(f"Date not visible on attempt {attempt+1}, scrolling day strip forward...")
+        scrolled = False
+        for sel in ["button[aria-label*='next' i]", "button[aria-label*='forward' i]", "button[aria-label*='right' i]"]:
             try:
                 btn = page.query_selector(sel)
-                if btn and btn.is_visible():
-                    # Check if target day is now visible
-                    day_cells = page.query_selector_all(f"button:has-text('{day_int}'), td:has-text('{day_int}')")
-                    for cell in day_cells:
-                        if cell.is_visible() and cell.is_enabled():
-                            cell.click()
-                            page.wait_for_timeout(1500)
-                            return
+                if btn and btn.is_visible() and btn.is_enabled():
                     btn.click()
                     page.wait_for_timeout(1000)
+                    scrolled = True
                     break
             except Exception:
                 continue
 
-    log.warning("Calendar navigation exhausted — proceeding anyway")
+        if not scrolled:
+            try:
+                page.evaluate("""
+                    () => {
+                        const btns = [...document.querySelectorAll('button')];
+                        const arrows = btns.filter(b =>
+                            b.textContent.trim().match(/^[›>→⟩]$/) ||
+                            (b.getAttribute('aria-label') || '').match(/next|forward|right/i)
+                        );
+                        if (arrows.length) arrows[arrows.length - 1].click();
+                    }
+                """)
+                page.wait_for_timeout(1000)
+            except Exception:
+                pass
+
+    log.warning(f"Could not find {day_abbr} {day_num} in day strip after scrolling")
 
 
 def _select_time_slot(page, target_time: str, court_pref: str) -> bool:
     """
-    Find and click the target time slot. Returns True if found and clicked.
-    Handles both 24h ("20:00") and 12h ("8:00 PM") formats.
+    Find and click the Book button for the target time slot.
+    The Lensbury timetable shows rows like "19:00 - 20:00 | Padel Courts 60 minutes | Padel Court 1 | £0.00 | Book"
+    We find a row whose text starts with the target time and click its Book button.
     """
-    # Normalise to both 24h and 12h for matching
+    from datetime import datetime
     try:
-        from datetime import datetime
         if "AM" in target_time.upper() or "PM" in target_time.upper():
             dt = datetime.strptime(target_time.strip(), "%I:%M %p")
         else:
             dt = datetime.strptime(target_time.strip(), "%H:%M")
-        time_24h = dt.strftime("%H:%M")
-        time_12h = dt.strftime("%-I:%M %p")   # e.g. "8:00 PM"
-        time_12h_zero = dt.strftime("%I:%M %p")  # e.g. "08:00 PM"
+        time_24h = dt.strftime("%H:%M")  # e.g. "19:00"
     except Exception:
         time_24h = target_time
-        time_12h = target_time
-        time_12h_zero = target_time
 
-    search_texts = [time_24h, time_12h, time_12h_zero]
-    log.info(f"Searching for slot text variants: {search_texts}")
-
-    # Wait a moment for slots to render after date selection
+    log.info(f"Looking for slot starting at {time_24h}, court pref: '{court_pref or 'any'}'")
     page.wait_for_timeout(2000)
 
-    for text in search_texts:
-        # Try court preference first, then any court
-        courts_to_try = [court_pref, ""] if court_pref else [""]
-        for court in courts_to_try:
-            slot_selectors = [
-                f"button:has-text('{text}')",
-                f"[class*='slot']:has-text('{text}')",
-                f"[class*='time']:has-text('{text}')",
-                f"td:has-text('{text}')",
-                f"li:has-text('{text}')",
-                f"div[role='button']:has-text('{text}')",
-            ]
-            for sel in slot_selectors:
-                try:
-                    slots = page.query_selector_all(sel)
-                    for slot in slots:
-                        if not slot.is_visible() or not slot.is_enabled():
-                            continue
-                        # If court preference, check parent/ancestor text
-                        if court:
-                            parent_text = slot.evaluate("el => el.closest('[class*=\"court\"], [class*=\"row\"], tr')?.innerText || ''")
-                            if court.lower() not in parent_text.lower():
-                                continue
-                        log.info(f"Clicking slot: '{text}' with selector {sel}")
-                        slot.click()
-                        page.wait_for_timeout(1500)
-                        return True
-                except Exception:
-                    continue
+    # Strategy 1: find a Book button whose containing row starts with the target time
+    try:
+        book_buttons = page.query_selector_all("button:has-text('Book')")
+        log.info(f"Found {len(book_buttons)} Book buttons on page")
+        for btn in book_buttons:
+            if not btn.is_visible() or not btn.is_enabled():
+                continue
+            # Walk up to the row container and check its text
+            row_text = btn.evaluate("""el => {
+                let node = el;
+                for (let i = 0; i < 6; i++) {
+                    node = node.parentElement;
+                    if (!node) break;
+                    const t = node.innerText || '';
+                    if (t.includes(':') && t.length > 10) return t;
+                }
+                return '';
+            }""")
+            log.info(f"Row text: {row_text[:80]!r}")
+            if time_24h not in row_text:
+                continue
+            if court_pref and court_pref.lower() not in row_text.lower():
+                continue
+            log.info(f"Clicking Book button for slot {time_24h}")
+            btn.click()
+            page.wait_for_timeout(2000)
+            return True
+    except Exception as e:
+        log.warning(f"Strategy 1 failed: {e}")
+
+    # Strategy 2: find any element containing the time and click it
+    try:
+        els = page.query_selector_all(f"*:has-text('{time_24h}')")
+        for el in els:
+            if not el.is_visible():
+                continue
+            text = el.inner_text().strip()
+            if time_24h in text and len(text) < 60:
+                log.info(f"Strategy 2: clicking element with text: {text!r}")
+                el.click()
+                page.wait_for_timeout(2000)
+                return True
+    except Exception as e:
+        log.warning(f"Strategy 2 failed: {e}")
 
     return False
 
