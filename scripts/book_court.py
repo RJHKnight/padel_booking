@@ -124,12 +124,6 @@ def run(attempt: int = 1):
                 except PlaywrightTimeout:
                     continue
 
-            # ── 5. Navigate to padel courts if not already there ──────────
-            if "/padel-courts" not in page.url:
-                log.info("Navigating to padel courts page…")
-                page.goto(BOOKING_URL, wait_until="networkidle", timeout=30_000)
-                page.wait_for_timeout(2000)
-
             # ── 4. Select the target date ─────────────────────────────────
             log.info(f"Selecting date: {target_human}")
             _select_date(page, target_iso)
@@ -143,7 +137,14 @@ def run(attempt: int = 1):
 
             # ── 6. Confirm booking ────────────────────────────────────────
             log.info("Confirming booking…")
-            _confirm_booking(page)
+            confirmed = _confirm_booking(page)
+
+            if not confirmed:
+                # We clicked a slot but couldn't verify the booking completed.
+                raise RuntimeError(
+                    "Slot was selected but booking could not be confirmed — "
+                    "no confirmation detected. Check the screenshot."
+                )
 
             log.info(f"✅ SUCCESS — Booked padel court for {target_human} at {TARGET_TIME}")
 
@@ -241,7 +242,12 @@ def _select_date(page, target_iso: str):
                 if not cell.is_visible():
                     continue
                 text = cell.inner_text().strip()
-                if day_abbr in text and str(day_num) in text and len(text) < 20:
+                # Require the cell to be exactly the day abbreviation + day number,
+                # e.g. "Mon\n29" or "Mon 29" — not just containing those substrings.
+                # This avoids matching "12:00", "29 June 2026", or unrelated text.
+                normalised = " ".join(text.split())  # collapse newlines/spaces
+                import re as _re
+                if _re.fullmatch(rf"{day_abbr}\s*{day_num}", normalised):
                     log.info(f"Found date cell: '{text}' — clicking")
                     cell.click()
                     page.wait_for_timeout(2000)
@@ -281,11 +287,25 @@ def _select_date(page, target_iso: str):
     log.warning(f"Could not find {day_abbr} {day_num} in day strip after scrolling")
 
 
+def _row_starts_with_time(row_text: str, time_24h: str) -> bool:
+    """
+    True only if the slot row's time range STARTS with the target time.
+    Rows render like "19:00 - 20:00\n60min". We must not match a row whose
+    *end* time equals the target (e.g. target 19:00 must reject "18:00 - 19:00").
+    """
+    if not row_text:
+        return False
+    import re
+    # Find the first HH:MM occurrence in the row and require it to equal target
+    m = re.search(r"\b(\d{1,2}:\d{2})\b", row_text)
+    return bool(m) and m.group(1) == time_24h
+
+
 def _select_time_slot(page, target_time: str, court_pref: str) -> bool:
     """
     Find and click the Book button for the target time slot.
-    The Lensbury timetable shows rows like "19:00 - 20:00 | Padel Courts 60 minutes | Padel Court 1 | £0.00 | Book"
-    We find a row whose text starts with the target time and click its Book button.
+    Returns True ONLY if a bookable Book button for the correct start time
+    (and matching court preference, if any) was found and clicked.
     """
     from datetime import datetime
     try:
@@ -300,99 +320,176 @@ def _select_time_slot(page, target_time: str, court_pref: str) -> bool:
     log.info(f"Looking for slot starting at {time_24h}, court pref: '{court_pref or 'any'}'")
     page.wait_for_timeout(2000)
 
-    # Strategy 1: find a Book button whose containing row starts with the target time
+    def _row_text_of(el):
+        """Walk up the DOM to find the slot row's full text."""
+        return el.evaluate("""el => {
+            let node = el;
+            for (let i = 0; i < 6; i++) {
+                node = node.parentElement;
+                if (!node) break;
+                const t = node.innerText || '';
+                if (t.includes(':') && t.length > 10) return t;
+            }
+            return '';
+        }""")
+
+    # Strategy 1: a 'Book' button whose row STARTS with the target time.
+    # "Fully booked" / "Not available" rows have no enabled Book button, so they
+    # are naturally skipped — that is the correct behaviour (treated as unavailable).
     try:
         book_buttons = page.query_selector_all("button:has-text('Book')")
-        log.info(f"Found {len(book_buttons)} Book buttons on page")
+        log.info(f"Found {len(book_buttons)} 'Book' buttons on page")
         for btn in book_buttons:
             if not btn.is_visible() or not btn.is_enabled():
                 continue
-            # Walk up to the row container and check its text
-            row_text = btn.evaluate("""el => {
-                let node = el;
-                for (let i = 0; i < 6; i++) {
-                    node = node.parentElement;
-                    if (!node) break;
-                    const t = node.innerText || '';
-                    if (t.includes(':') && t.length > 10) return t;
-                }
-                return '';
-            }""")
-            log.info(f"Row text: {row_text[:80]!r}")
-            if time_24h not in row_text:
+            row_text = _row_text_of(btn)
+            log.info(f"Candidate row: {row_text[:80]!r}")
+            if not _row_starts_with_time(row_text, time_24h):
                 continue
             if court_pref and court_pref.lower() not in row_text.lower():
                 continue
-            log.info(f"Clicking Book button for slot {time_24h}")
+            log.info(f"Clicking 'Book' for slot {time_24h}")
             btn.click()
             page.wait_for_timeout(2000)
             return True
     except Exception as e:
         log.warning(f"Strategy 1 failed: {e}")
 
-    # Strategy 2: find a slot row that STARTS with the target time (not ends with it)
-    # Rows look like "19:00 - 20:00\n60min" — match only if time_24h is at the start
+    # Strategy 2: click the slot row itself, then look for a Book button that
+    # appears (some UIs reveal it after selecting the row). Only return True if
+    # we actually manage to click an enabled Book button.
     try:
         els = page.query_selector_all(f"*:has-text('{time_24h}')")
         for el in els:
             if not el.is_visible():
                 continue
             text = el.inner_text().strip()
-            # Must start with the target time to avoid matching end-time of prior slot
-            if text.startswith(time_24h) and len(text) < 60:
-                log.info(f"Strategy 2: clicking slot row: {text!r}")
-                el.click()
-                page.wait_for_timeout(2000)
-                # Now look for a Book button that appeared after clicking the row
-                try:
-                    book_btn = page.wait_for_selector("button:has-text('Book')", timeout=5000)
-                    if book_btn and book_btn.is_visible() and book_btn.is_enabled():
-                        log.info("Clicking Book button after slot selection")
+            if not (text.startswith(time_24h) and len(text) < 60):
+                continue
+            log.info(f"Strategy 2: selecting slot row: {text!r}")
+            el.click()
+            page.wait_for_timeout(2000)
+            try:
+                book_btn = page.wait_for_selector("button:has-text('Book')", timeout=5000)
+                if book_btn and book_btn.is_visible() and book_btn.is_enabled():
+                    # Verify this Book button is for our target time
+                    row_text = _row_text_of(book_btn)
+                    if _row_starts_with_time(row_text, time_24h) or not row_text:
+                        log.info("Strategy 2: clicking revealed 'Book' button")
                         book_btn.click()
                         page.wait_for_timeout(2000)
-                except Exception:
-                    pass
-                return True
+                        return True
+            except Exception:
+                pass
+            # Clicking the row did not lead to a bookable button — keep looking
     except Exception as e:
         log.warning(f"Strategy 2 failed: {e}")
+
+    log.warning(f"No bookable slot found for {time_24h}")
+    return False
+
+
+def _booking_confirmed(page) -> bool:
+    """
+    Detect whether a booking has actually been confirmed, using multiple signals:
+      1. Explicit confirmation text on the page
+      2. The shopping basket showing a non-empty / non-zero state
+      3. URL changing to a confirmation/checkout-complete path
+    Returns True only if at least one strong signal is present.
+    """
+    try:
+        page_text = page.inner_text("body").lower()
+    except Exception:
+        page_text = ""
+
+    strong_phrases = [
+        "booking confirmed",
+        "booking complete",
+        "your booking is confirmed",
+        "thank you for your booking",
+        "reservation confirmed",
+        "added to basket",
+        "added to your basket",
+    ]
+    if any(p in page_text for p in strong_phrases):
+        log.info("Booking confirmation text detected on page")
+        return True
+
+    # Basket no longer empty is a good signal that the slot was reserved
+    basket_empty = "your shopping basket is empty" in page_text or "basket is empty" in page_text
+    if not basket_empty and ("basket" in page_text or "checkout" in page_text):
+        # Look for a money value other than £0.00 in the basket area
+        import re
+        money = re.findall(r"£\s?(\d+\.\d{2})", page_text)
+        if any(float(m) > 0 for m in money):
+            log.info("Basket shows a non-zero amount — slot appears reserved")
+            return True
+        # Even a £0.00 basket that's explicitly NOT empty can indicate a held slot
+        if not basket_empty and "remove" in page_text:
+            log.info("Basket contains an item (Remove control present)")
+            return True
+
+    # URL signal
+    url = page.url.lower()
+    if any(k in url for k in ["confirm", "checkout", "complete", "basket", "success"]):
+        log.info(f"URL suggests progression to checkout/confirmation: {page.url}")
+        return True
 
     return False
 
 
-def _confirm_booking(page):
+def _confirm_booking(page) -> bool:
     """
-    Click through any confirmation dialogs/buttons to finalise the booking.
+    Click through confirmation/checkout buttons to finalise the booking.
+    Returns True only if a booking confirmation can be verified afterwards.
+
+    NOTE: This stops at the point the slot is reserved / in the basket. If the
+    club requires payment to finalise, that step is intentionally NOT automated —
+    review and complete payment manually. The booking will be held in the basket.
     """
+    # If we're already confirmed (e.g. single-click booking), report it
+    if _booking_confirmed(page):
+        return True
+
     confirm_selectors = [
         "button:has-text('Confirm')",
-        "button:has-text('Book')",
         "button:has-text('Complete booking')",
-        "button:has-text('Pay')",
+        "button:has-text('Add to basket')",
         "button:has-text('Reserve')",
-        "button[type='submit']",
+        "button:has-text('Continue')",
+        "button:has-text('Book')",
     ]
 
+    clicked_any = False
     for sel in confirm_selectors:
         try:
-            btn = page.wait_for_selector(sel, timeout=8000)
-            if btn and btn.is_visible():
+            btn = page.wait_for_selector(sel, timeout=6000)
+            if btn and btn.is_visible() and btn.is_enabled():
                 log.info(f"Confirming with: {sel}")
                 btn.click()
+                clicked_any = True
                 page.wait_for_timeout(3000)
-                page.wait_for_load_state("networkidle", timeout=15_000)
-
-                # Check for success indicators
-                success_texts = ["confirmed", "booking confirmed", "thank you", "success", "booked"]
-                page_text = page.inner_text("body").lower()
-                if any(t in page_text for t in success_texts):
-                    log.info("Confirmation text detected on page ✅")
-                    return
-                # Continue looking for more confirm steps (multi-step checkout)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15_000)
+                except PlaywrightTimeout:
+                    pass
+                if _booking_confirmed(page):
+                    return True
         except PlaywrightTimeout:
             continue
+        except Exception as e:
+            log.warning(f"Confirm step {sel} errored: {e}")
+            continue
 
-    # Final page state
-    log.info(f"Final page URL after confirmation: {page.url}")
+    # Final verification after all attempts
+    log.info(f"Final page URL after confirmation attempts: {page.url}")
+    confirmed = _booking_confirmed(page)
+    if not confirmed:
+        log.warning(
+            "Could not verify booking confirmation. "
+            f"(clicked a confirm button: {clicked_any})"
+        )
+    return confirmed
 
 
 if __name__ == "__main__":
