@@ -434,10 +434,13 @@ def _booking_confirmed(page) -> bool:
             log.info("Basket contains an item (Remove control present)")
             return True
 
-    # URL signal
+    # URL signal — ONLY treat as confirmed if the URL indicates completion.
+    # Being on /basket/checkout means the form still needs submitting, so those
+    # are deliberately excluded here.
     url = page.url.lower()
-    if any(k in url for k in ["confirm", "checkout", "complete", "basket", "success"]):
-        log.info(f"URL suggests progression to checkout/confirmation: {page.url}")
+    completion_markers = ["confirmation", "/complete", "/success", "booking-confirmed", "/confirmed"]
+    if any(k in url for k in completion_markers):
+        log.info(f"URL indicates completed booking: {page.url}")
         return True
 
     return False
@@ -551,8 +554,11 @@ def _confirm_booking(page) -> bool:
     club requires payment to finalise, that step is intentionally NOT automated —
     review and complete payment manually. The booking will be held in the basket.
     """
-    # If we're already confirmed (e.g. single-click booking), report it
-    if _booking_confirmed(page):
+    # If we're already confirmed (e.g. single-click booking) AND not still sitting
+    # on the checkout/basket page, report success early.
+    url = page.url.lower()
+    on_checkout = "checkout" in url or "basket" in url
+    if not on_checkout and _booking_confirmed(page):
         return True
 
     # Fill the checkout "Information required for booking" form if present
@@ -576,13 +582,24 @@ def _confirm_booking(page) -> bool:
                 log.info(f"Confirming with: {sel}")
                 btn.click()
                 clicked_any = True
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(3500)
                 try:
                     page.wait_for_load_state("networkidle", timeout=15_000)
                 except PlaywrightTimeout:
                     pass
-                if _booking_confirmed(page):
+                # Only count as success if we've actually left the checkout page
+                # OR a confirmation signal is present.
+                new_url = page.url.lower()
+                still_on_checkout = "checkout" in new_url or "basket" in new_url
+                if not still_on_checkout and _booking_confirmed(page):
+                    log.info("Booking verified after confirm click")
                     return True
+                if not still_on_checkout:
+                    # Left checkout without an error — likely the confirmation page
+                    log.info(f"Left checkout page after confirm: {page.url}")
+                    return True
+                # Still on checkout — a required field may be blocking submission.
+                log.info("Still on checkout after clicking confirm; re-checking form")
         except PlaywrightTimeout:
             continue
         except Exception as e:
@@ -591,6 +608,10 @@ def _confirm_booking(page) -> bool:
 
     # Final verification after all attempts
     log.info(f"Final page URL after confirmation attempts: {page.url}")
+    final_url = page.url.lower()
+    if "checkout" in final_url or "basket" in final_url:
+        log.warning("Still on checkout/basket page — booking NOT confirmed")
+        return False
     confirmed = _booking_confirmed(page)
     if not confirmed:
         log.warning(
