@@ -143,10 +143,16 @@ def run(attempt: int = 1):
 def _fill_login_form(page):
     """Fill in email and password fields wherever they appear."""
     email_selectors = [
+        "input[placeholder*='Email address or customer ID' i]",
+        "input[placeholder*='customer ID' i]",
         "input[type='email']",
         "input[name='email']",
+        "input[name='username']",
         "input[placeholder*='email' i]",
         "input[placeholder*='Email' i]",
+        # Last resort: first visible text/email input in the form
+        "form input[type='text']:visible",
+        "dialog input:not([type='password']):visible",
     ]
     password_selectors = [
         "input[type='password']",
