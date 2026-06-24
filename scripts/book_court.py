@@ -330,17 +330,28 @@ def _select_time_slot(page, target_time: str, court_pref: str) -> bool:
     except Exception as e:
         log.warning(f"Strategy 1 failed: {e}")
 
-    # Strategy 2: find any element containing the time and click it
+    # Strategy 2: find a slot row that STARTS with the target time (not ends with it)
+    # Rows look like "19:00 - 20:00\n60min" — match only if time_24h is at the start
     try:
         els = page.query_selector_all(f"*:has-text('{time_24h}')")
         for el in els:
             if not el.is_visible():
                 continue
             text = el.inner_text().strip()
-            if time_24h in text and len(text) < 60:
-                log.info(f"Strategy 2: clicking element with text: {text!r}")
+            # Must start with the target time to avoid matching end-time of prior slot
+            if text.startswith(time_24h) and len(text) < 60:
+                log.info(f"Strategy 2: clicking slot row: {text!r}")
                 el.click()
                 page.wait_for_timeout(2000)
+                # Now look for a Book button that appeared after clicking the row
+                try:
+                    book_btn = page.wait_for_selector("button:has-text('Book')", timeout=5000)
+                    if book_btn and book_btn.is_visible() and book_btn.is_enabled():
+                        log.info("Clicking Book button after slot selection")
+                        book_btn.click()
+                        page.wait_for_timeout(2000)
+                except Exception:
+                    pass
                 return True
     except Exception as e:
         log.warning(f"Strategy 2 failed: {e}")

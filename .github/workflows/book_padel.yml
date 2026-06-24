@@ -37,7 +37,7 @@ jobs:
           FLOW_PASSWORD:  ${{ secrets.FLOW_PASSWORD }}
           TARGET_TIME:    "19:00"
           COURT_PREF:     ${{ secrets.COURT_PREF }}
-          DAYS_AHEAD:     "5"
+          DAYS_AHEAD:     "6"
           MAX_RETRIES:    "2"
           RETRY_DELAY_S:  "15"
           HEADLESS:       "true"
