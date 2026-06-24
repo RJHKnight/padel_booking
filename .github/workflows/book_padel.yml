@@ -35,10 +35,10 @@ jobs:
         env:
           FLOW_EMAIL:     ${{ secrets.FLOW_EMAIL }}
           FLOW_PASSWORD:  ${{ secrets.FLOW_PASSWORD }}
-          TARGET_TIME:    "19:00"
+          TARGET_TIME:    ${{ secrets.TARGET_TIME || '19:00' }}
           COURT_PREF:     ${{ secrets.COURT_PREF }}
-          DAYS_AHEAD:     "5"
-          MAX_RETRIES:    "2"
+          DAYS_AHEAD:     ${{ secrets.DAYS_AHEAD || '5' }}
+          MAX_RETRIES:    ${{ secrets.MAX_RETRIES || '2' }}
           RETRY_DELAY_S:  "15"
           HEADLESS:       "true"
         run: python scripts/book_court.py
