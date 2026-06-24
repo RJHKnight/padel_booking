@@ -1,0 +1,52 @@
+name: Book Padel Court
+
+on:
+  # Slots open at 08:00 UK time. Book 5 days ahead for Tuesday = run on Thursday.
+  # BST (summer, UTC+1): fire at 06:57 UTC = 07:57 BST
+  # GMT (winter, UTC+0): fire at 07:57 UTC = 07:57 GMT
+  schedule:
+    - cron: '57 6 * * 4'
+    - cron: '57 7 * * 4'
+
+  # Manual trigger for testing
+  workflow_dispatch:
+
+jobs:
+  book-court:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright python-dotenv
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run booking script
+        env:
+          FLOW_EMAIL:     ${{ secrets.FLOW_EMAIL }}
+          FLOW_PASSWORD:  ${{ secrets.FLOW_PASSWORD }}
+          TARGET_TIME:    "20:00"
+          COURT_PREF:     ${{ secrets.COURT_PREF }}
+          DAYS_AHEAD:     "5"
+          MAX_RETRIES:    "12"
+          RETRY_DELAY_S:  "15"
+          HEADLESS:       "true"
+        run: python scripts/book_court.py
+
+      - name: Upload debug screenshot on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: booking-error-screenshot
+          path: /tmp/padel_error_attempt*.png
+          retention-days: 7
