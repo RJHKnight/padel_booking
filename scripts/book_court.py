@@ -408,6 +408,9 @@ def _booking_confirmed(page) -> bool:
         "your booking is confirmed",
         "thank you for your booking",
         "reservation confirmed",
+        "booking reference",
+        "your bookings",
+        "upcoming bookings",
         "added to basket",
         "added to your basket",
     ]
@@ -438,6 +441,73 @@ def _booking_confirmed(page) -> bool:
     return False
 
 
+def _fill_checkout_form(page) -> None:
+    """
+    Fill the 'Information required for booking' checkout form that Lensbury shows
+    before the final 'Confirm booking' button. Fields:
+      Player 2: (Member Name / Guest Name)        -> "Amelia Fink"
+      Player 3: (... or N/A if only two players)  -> "N/A"
+      Player 4: (... or N/A if only two players)  -> "N/A"
+    Matching is done by the field's label/placeholder text so it is robust to
+    input ordering. Safe to call even if the form isn't present.
+    """
+    player_values = {
+        "player 2": "Amelia Fink",
+        "player 3": "N/A",
+        "player 4": "N/A",
+    }
+
+    try:
+        # Collect all visible text inputs / textareas on the checkout page
+        inputs = page.query_selector_all("input[type='text'], input:not([type]), textarea")
+        visible_inputs = [i for i in inputs if i.is_visible() and i.is_enabled()]
+        if not visible_inputs:
+            log.info("No checkout form inputs found — assuming none required")
+            return
+
+        log.info(f"Checkout form: found {len(visible_inputs)} input field(s)")
+
+        for inp in visible_inputs:
+            # Work out which player this field belongs to by inspecting nearby label text
+            label_text = inp.evaluate("""el => {
+                // Look at preceding label/text, aria-label, placeholder, or parent text
+                const aria = el.getAttribute('aria-label') || '';
+                const ph = el.getAttribute('placeholder') || '';
+                let labelText = '';
+                // Walk up a few parents and grab their text
+                let node = el;
+                for (let i = 0; i < 4; i++) {
+                    node = node.parentElement;
+                    if (!node) break;
+                    const t = node.innerText || '';
+                    if (t.length > labelText.length) labelText = t;
+                }
+                return (aria + ' ' + ph + ' ' + labelText).toLowerCase();
+            }""")
+
+            matched = False
+            for key, value in player_values.items():
+                if key in label_text:
+                    current = inp.input_value()
+                    if current.strip():
+                        log.info(f"{key.title()} already has value {current!r} — leaving as is")
+                    else:
+                        log.info(f"Filling {key.title()} = {value!r}")
+                        inp.fill(value)
+                    matched = True
+                    break
+
+            if not matched:
+                # Unknown required field — if it's empty, default to N/A so the
+                # form can submit rather than blocking on a missing value.
+                if not inp.input_value().strip():
+                    log.info("Filling unrecognised required field with 'N/A'")
+                    inp.fill("N/A")
+
+    except Exception as e:
+        log.warning(f"Could not fully fill checkout form: {e}")
+
+
 def _confirm_booking(page) -> bool:
     """
     Click through confirmation/checkout buttons to finalise the booking.
@@ -451,10 +521,14 @@ def _confirm_booking(page) -> bool:
     if _booking_confirmed(page):
         return True
 
+    # Fill the checkout "Information required for booking" form if present
+    # (player names) before attempting to click the final Confirm button.
+    _fill_checkout_form(page)
+
     confirm_selectors = [
+        "button:has-text('Confirm booking')",
         "button:has-text('Confirm')",
         "button:has-text('Complete booking')",
-        "button:has-text('Add to basket')",
         "button:has-text('Reserve')",
         "button:has-text('Continue')",
         "button:has-text('Book')",
