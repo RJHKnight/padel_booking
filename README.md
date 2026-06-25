@@ -1,5 +1,10 @@
 # Lensbury Padel Court Auto-Booker
 
+> **Two ways to run this:**
+> - **GitHub Actions** (simple, free, but scheduled runs can be delayed 5–30 min)
+> - **Cloud Run + Cloud Scheduler** (reliable ~1s trigger, fast session-reuse polling) — see [DEPLOY_CLOUDRUN.md](DEPLOY_CLOUDRUN.md). **Recommended for fast-moving slots.**
+
+
 Automatically books a padel court at Lensbury Club via `flow.onl` every week, firing 
 at slot-release time (08:00 UK) to get in first.
 

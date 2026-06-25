@@ -33,14 +33,23 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 # ── Config ──────────────────────────────────────────────────────────────────
 BOOKING_URL   = "https://lensburyclub.bookings.flow.onl/location/lensbury-club/padel-courts"
-EMAIL         = os.environ["FLOW_EMAIL"]
-PASSWORD      = os.environ["FLOW_PASSWORD"]
+EMAIL         = os.environ.get("FLOW_EMAIL", "")
+PASSWORD      = os.environ.get("FLOW_PASSWORD", "")
 TARGET_TIME   = os.environ.get("TARGET_TIME", "20:00")   # 24h format preferred
 COURT_PREF    = os.environ.get("COURT_PREF", "")         # blank = take any available
 DAYS_AHEAD    = int(os.environ.get("DAYS_AHEAD", "5"))   # book this many days in advance
 MAX_RETRIES   = int(os.environ.get("MAX_RETRIES", "10"))  # retry attempts if slot not yet live
 RETRY_DELAY_S = int(os.environ.get("RETRY_DELAY_S", "20")) # seconds between retries
 HEADLESS      = os.environ.get("HEADLESS", "true").lower() != "false"
+
+# Session persistence: path to a Playwright storage_state JSON file. If present
+# and valid, we skip the ~40s login and reuse the saved session. On Cloud Run we
+# point this at a path hydrated from a Secret/GCS at container start.
+SESSION_STATE_PATH = os.environ.get("SESSION_STATE_PATH", "/tmp/flow_session.json")
+
+# When True, the script logs in once, persists the session, and exits (used to
+# seed/refresh the stored session). Set via env for a one-off "login" run.
+SEED_SESSION_ONLY = os.environ.get("SEED_SESSION_ONLY", "false").lower() == "true"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -58,52 +67,74 @@ def target_date_str() -> str:
 
 
 def run(attempt: int = 1):
+    if not EMAIL or not PASSWORD:
+        raise RuntimeError("FLOW_EMAIL and FLOW_PASSWORD must be set")
     target_iso, target_human = target_date_str()
     log.info(f"Attempt {attempt}/{MAX_RETRIES} — targeting {target_human} at {TARGET_TIME}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
+
+        # Reuse a saved session if we have one — this skips the slow login.
+        context_kwargs = {
+            "viewport": {"width": 1280, "height": 900},
+            "user_agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
-            )
-        )
+            ),
+        }
+        have_session = os.path.exists(SESSION_STATE_PATH) and os.path.getsize(SESSION_STATE_PATH) > 0
+        if have_session:
+            log.info(f"Reusing saved session from {SESSION_STATE_PATH}")
+            context_kwargs["storage_state"] = SESSION_STATE_PATH
+
+        context = browser.new_context(**context_kwargs)
         page = context.new_page()
 
         try:
             # ── 1. Load the booking page ──────────────────────────────────
             log.info("Loading booking page…")
             page.goto(BOOKING_URL, wait_until="networkidle", timeout=30_000)
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(1500)
 
-            # ── 2. Log in ─────────────────────────────────────────────────
-            # Flow.onl typically shows a login modal or redirect; look for common triggers
-            login_triggers = [
-                "text=Log in",
-                "text=Sign in",
-                "text=Login",
-                "[data-testid='login-button']",
-                "button:has-text('Sign in')",
-                "a:has-text('Log in')",
-            ]
-            logged_in = False
-            for selector in login_triggers:
+            # ── 2. Log in (only if the saved session didn't carry us in) ──
+            if _needs_login(page):
+                log.info("Not logged in — performing fresh login")
+                login_triggers = [
+                    "text=Log in",
+                    "text=Sign in",
+                    "text=Login",
+                    "[data-testid='login-button']",
+                    "button:has-text('Sign in')",
+                    "a:has-text('Log in')",
+                ]
+                for selector in login_triggers:
+                    try:
+                        btn = page.wait_for_selector(selector, timeout=5000)
+                        if btn and btn.is_visible():
+                            log.info(f"Found login trigger: {selector}")
+                            btn.click()
+                            page.wait_for_timeout(1500)
+                            break
+                    except PlaywrightTimeout:
+                        continue
+
+                _fill_login_form(page)
+
+                # Persist the fresh session for next time
                 try:
-                    btn = page.wait_for_selector(selector, timeout=5000)
-                    if btn and btn.is_visible():
-                        log.info(f"Found login trigger: {selector}")
-                        btn.click()
-                        page.wait_for_timeout(1500)
-                        logged_in = True
-                        break
-                except PlaywrightTimeout:
-                    continue
+                    context.storage_state(path=SESSION_STATE_PATH)
+                    log.info(f"Saved session to {SESSION_STATE_PATH}")
+                except Exception as e:
+                    log.warning(f"Could not save session: {e}")
+            else:
+                log.info("Saved session is still valid — skipped login")
 
-            # Fill credentials wherever the form appeared
-            _fill_login_form(page)
+            # If we were only asked to seed the session, stop here.
+            if SEED_SESSION_ONLY:
+                log.info("SEED_SESSION_ONLY set — session seeded, exiting")
+                return
 
             # ── 3. Click through to the activity if needed ───────────────
             activity_selectors = [
@@ -158,6 +189,37 @@ def run(attempt: int = 1):
 
         finally:
             browser.close()
+
+
+def _needs_login(page) -> bool:
+    """
+    Detect whether we still need to authenticate. With a reused session we may
+    already be logged in. Heuristics: a visible login trigger / login form means
+    we are NOT logged in; presence of account/logout UI means we are.
+    """
+    try:
+        body = page.inner_text("body").lower()
+    except Exception:
+        body = ""
+
+    # Signs we ARE logged in
+    if any(s in body for s in ["my account", "log out", "logout", "sign out"]):
+        return False
+
+    # Signs we are NOT logged in
+    if "log in" in body or "sign in" in body or "login" in body:
+        return True
+
+    # Fallback: look for a password field
+    try:
+        pw = page.query_selector("input[type='password']")
+        if pw and pw.is_visible():
+            return True
+    except Exception:
+        pass
+
+    # Default to attempting login if unsure (safe — login is idempotent-ish)
+    return True
 
 
 def _fill_login_form(page):
