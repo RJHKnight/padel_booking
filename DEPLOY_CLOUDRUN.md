@@ -50,7 +50,7 @@ gcloud run deploy padel-booker \
   --memory 1Gi \
   --cpu 1 \
   --timeout 1800 \
-  --set-env-vars "HEADLESS=true,SESSION_STATE_PATH=/tmp/flow_session.json,GCS_BUCKET=$BUCKET,TARGET_TIME=19:00,DAYS_AHEAD=5,MAX_RETRIES=30,RETRY_DELAY_S=5" \
+  --set-env-vars "HEADLESS=true,SESSION_STATE_PATH=/tmp/flow_session.json,GCS_BUCKET=$BUCKET,PROVIDER=flow,VENUE=lensbury-club,ACTIVITY=padel-courts,TARGET_TIME=19:00,DAYS_AHEAD=5,MAX_RETRIES=30,RETRY_DELAY_S=5,PLAYER_NAMES=Amelia Fink" \
   --set-secrets "FLOW_EMAIL=flow-email:latest,FLOW_PASSWORD=flow-password:latest"
 ```
 

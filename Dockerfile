@@ -10,7 +10,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt flask gunicorn
 
 # App code
-COPY scripts/ ./scripts/
+COPY booker/ ./booker/
 COPY server.py .
 
 # Cloud Run sets PORT (default 8080). Gunicorn serves the Flask app.
